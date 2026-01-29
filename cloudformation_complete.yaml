@@ -1,0 +1,219 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Spotify Pipeline - Complete Auto Setup'
+
+Resources:
+  SpotifyCleanBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: spotify-pipeline-aya-clean
+
+  AthenaResultsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: spotify-pipeline-aya-athena-results
+
+  SpotifyGlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: spotify_clean_db_trend
+        Description: Database for cleaned Spotify charts
+
+  SpotifyCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: spotify-crawler
+      Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/LabRole'
+      DatabaseName: !Ref SpotifyGlueDatabase
+      Targets:
+        S3Targets:
+          - Path: s3://spotify-pipeline-aya-clean/
+      SchemaChangePolicy:
+        UpdateBehavior: UPDATE_IN_DATABASE
+
+  AthenaWorkgroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: spotify-workgroup
+      RecursiveDeleteOption: true
+      WorkGroupConfiguration:
+        ResultConfiguration:
+          OutputLocation: s3://spotify-pipeline-aya-athena-results/
+
+  # Lambda pour créer la table Athena
+  CreateTableLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: spotify-create-table
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/LabRole'
+      Timeout: 300
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import time
+          
+          athena = boto3.client('athena')
+          
+          def lambda_handler(event, context):
+              print("=== CREATING ATHENA TABLE ===")
+              
+              sql = """
+              CREATE EXTERNAL TABLE IF NOT EXISTS spotify_clean_db_trend.spotify_trends_correct (
+                  rank STRING,
+                  uri STRING,
+                  artist_names STRING,
+                  track_name STRING,
+                  source STRING,
+                  peak_rank STRING,
+                  previous_rank STRING,
+                  days_on_chart STRING,
+                  streams STRING,
+                  month STRING,
+                  year STRING
+              )
+              STORED AS PARQUET
+              LOCATION 's3://spotify-pipeline-aya-clean/'
+              TBLPROPERTIES ('has_encrypted_data'='false');
+              """
+              
+              try:
+                  response = athena.start_query_execution(
+                      QueryString=sql,
+                      QueryExecutionContext={'Database': 'spotify_clean_db_trend'},
+                      ResultConfiguration={
+                          'OutputLocation': 's3://spotify-pipeline-aya-athena-results/'
+                      }
+                  )
+                  
+                  query_id = response['QueryExecutionId']
+                  print(f"Query started: {query_id}")
+                  
+                  # Attendre que la query finisse
+                  max_attempts = 30
+                  attempt = 0
+                  
+                  while attempt < max_attempts:
+                      response = athena.get_query_execution(QueryExecutionId=query_id)
+                      status = response['QueryExecution']['Status']['State']
+                      
+                      if status == 'SUCCEEDED':
+                          print("Table created successfully!")
+                          return {
+                              'statusCode': 200,
+                              'body': json.dumps('Table created successfully!')
+                          }
+                      elif status == 'FAILED':
+                          print(f"Query failed: {response['QueryExecution']['Status']['StateChangeReason']}")
+                          return {
+                              'statusCode': 500,
+                              'body': json.dumps('Query failed')
+                          }
+                      
+                      time.sleep(2)
+                      attempt += 1
+                  
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps('Query timeout')
+                  }
+              
+              except Exception as e:
+                  print(f"ERROR: {str(e)}")
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps(f'Error: {str(e)}')
+                  }
+
+  # Déclenche la création de table automatiquement
+  CreateTableCustom:
+    Type: Custom::CreateTable
+    Properties:
+      ServiceToken: !GetAtt CreateTableLambda.Arn
+
+  AutoTriggerLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: spotify-auto-trigger
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/LabRole'
+      Timeout: 600
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          
+          glue = boto3.client('glue')
+          
+          def lambda_handler(event, context):
+              print("=== SPOTIFY PIPELINE AUTO-TRIGGER ===")
+              
+              try:
+                  print("STEP 1: Starting Glue Job 'spotify_raw_to_clean'...")
+                  job_response = glue.start_job_run(JobName='spotify_raw_to_clean')
+                  job_run_id = job_response['JobRunId']
+                  print(f"SUCCESS: Job started with Run ID: {job_run_id}")
+                  
+                  print("STEP 2: Starting Crawler 'spotify-crawler'...")
+                  glue.start_crawler(Name='spotify-crawler')
+                  print("SUCCESS: Crawler started")
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps('Pipeline triggered successfully!')
+                  }
+              
+              except Exception as e:
+                  print(f"ERROR: {str(e)}")
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps(f'Error: {str(e)}')
+                  }
+
+  AutoTriggerRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Trigger Spotify pipeline automatically
+      ScheduleExpression: rate(3 minutes)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt AutoTriggerLambda.Arn
+          RoleArn: !Sub 'arn:aws:iam::${AWS::AccountId}:role/LabRole'
+          Id: SpotifyAutoTrigger
+
+  AutoTriggerPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AutoTriggerLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt AutoTriggerRule.Arn
+
+Outputs:
+  CleanBucket:
+    Description: Clean bucket with Parquet files
+    Value: spotify-pipeline-aya-clean
+
+  Database:
+    Description: Glue Database
+    Value: spotify_clean_db_trend
+
+  Table:
+    Description: Athena Table (auto-created)
+    Value: spotify_trends_correct
+
+  Crawler:
+    Description: Glue Crawler
+    Value: spotify-crawler
+
+  Workgroup:
+    Description: Athena Workgroup
+    Value: spotify-workgroup
+
+  Status:
+    Description: Pipeline Status
+    Value: 'Complete! Table auto-created. Pipeline triggers every 3 minutes. Ready for queries!'
