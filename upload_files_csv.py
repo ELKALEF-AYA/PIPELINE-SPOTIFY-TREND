@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
 Spotify Pipeline Automation Script
-Automatise TOUT: Upload CSV → Glue Job → Athena → Visualizations
 """
 
 import boto3
