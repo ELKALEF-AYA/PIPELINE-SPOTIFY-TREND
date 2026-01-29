@@ -69,7 +69,7 @@ df = load_data()
 st.divider()
 
 # ============================================================================
-# REQUÊTE 1️⃣ : TOP 20 HITS  - TABLE
+# REQUÊTE  : TOP 20 HITS  - TABLE
 # ============================================================================
 
 st.markdown("###  TOP 20 HITS - À PASSER EN SOIRÉE")
@@ -101,7 +101,7 @@ st.markdown("")
 st.divider()
 
 # ============================================================================
-# REQUÊTE 2️⃣ : TOP 12 CHANSONS DURABLES  - TABLE
+# REQUÊTE  : TOP 12 CHANSONS DURABLES  - TABLE
 # ============================================================================
 
 st.markdown("###  CHANSONS DURABLES - LES HITS QUI RESTENT")
@@ -281,4 +281,4 @@ with col_right:
         st.metric(" Label Dominant", labels_data.iloc[0]['source'])
         st.metric(" Part du Leader", f"{labels_data.iloc[0]['percentage']:.1f}%")
     else:
-        st.warning("⚠️ Aucune donnée de label disponible")
+        st.warning("Aucune donnée de label disponible")
